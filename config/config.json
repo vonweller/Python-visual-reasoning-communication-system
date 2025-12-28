@@ -1,0 +1,33 @@
+{
+    "mqtt": {
+        "broker": "10.1.2.3",
+        "port": 1883,
+        "username": "siot",
+        "password": "dfrobot",
+        "publish_topic": "siot/推理结果",
+        "topics": [
+            {
+                "name": "舵机",
+                "topic": "siot/舵机"
+            },
+            {
+                "name": "水泵",
+                "topic": "siot/水泵"
+            },
+            {
+                "name": "摄像头",
+                "topic": "siot/摄像头"
+            }
+        ]
+    },
+    "yolo": {
+        "model_path": "best.pt",
+        "conf_threshold": 0.88,
+        "http_stream_url": "http://192.168.10.43:81/stream",
+        "device": "cpu"
+    },
+    "ui": {
+        "theme": "light",
+        "theme_color": "#28a745"
+    }
+}
