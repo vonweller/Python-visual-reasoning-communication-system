@@ -4,10 +4,16 @@ import time
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 import os
+import sys
 
 class YoloInference:
     def __init__(self, model_path="yolov8n.pt", conf_threshold=0.5, classes_dict=None, device="cpu"):
-        self.model_path = model_path
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        self.model_path = os.path.join(base_path, model_path)
         self.conf_threshold = conf_threshold
         self.classes_dict = classes_dict
         self.device = device

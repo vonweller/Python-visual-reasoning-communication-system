@@ -1,10 +1,16 @@
 import json
 import os
+import sys
 
 class ConfigManager:
     def __init__(self, config_path="config/config.json", classes_path="config/classes.json"):
-        self.config_path = config_path
-        self.classes_path = classes_path
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        self.config_path = os.path.join(base_path, config_path)
+        self.classes_path = os.path.join(base_path, classes_path)
         self.config = self.load_json(self.config_path)
         self.classes = self.load_json(self.classes_path)
 

@@ -14,6 +14,7 @@ from core.config_manager import ConfigManager
 from core.inference import YoloInference
 from core.mqtt_worker import MqttWorker
 from core.video_thread import VideoThread
+from core.batch_inference_thread import BatchInferenceThread
 from ui.widgets import ImageDisplayWidget, LogTableWidget
 
 class MainWindow(QMainWindow):
@@ -34,6 +35,11 @@ class MainWindow(QMainWindow):
         self.mqtt_worker = None
         self.video_thread = None
         self.http_thread = None
+        self.batch_inference_thread = None
+
+        # Batch inference data
+        self.batch_results = []
+        self.current_batch_index = 0
 
         # Predefined Themes
         self.color_themes = [
@@ -113,6 +119,49 @@ class MainWindow(QMainWindow):
         
         controls_layout.addWidget(self.btn_load_image)
         controls_layout.addWidget(self.btn_load_folder)
+        
+        # Batch inference controls
+        batch_group = QGroupBox("批量推理")
+        batch_layout = QVBoxLayout(batch_group)
+        
+        # Progress bar
+        from PySide6.QtWidgets import QProgressBar
+        self.batch_progress = QProgressBar()
+        self.batch_progress.setValue(0)
+        self.batch_progress.setVisible(False)
+        batch_layout.addWidget(self.batch_progress)
+        
+        # Progress label
+        self.batch_progress_label = QLabel("准备就绪")
+        self.batch_progress_label.setVisible(False)
+        batch_layout.addWidget(self.batch_progress_label)
+        
+        # Navigation buttons
+        nav_layout = QHBoxLayout()
+        self.btn_prev_result = QPushButton("上一张")
+        self.btn_prev_result.clicked.connect(self.show_prev_batch_result)
+        self.btn_prev_result.setEnabled(False)
+        self.btn_next_result = QPushButton("下一张")
+        self.btn_next_result.clicked.connect(self.show_next_batch_result)
+        self.btn_next_result.setEnabled(False)
+        
+        nav_layout.addWidget(self.btn_prev_result)
+        nav_layout.addWidget(self.btn_next_result)
+        batch_layout.addLayout(nav_layout)
+        
+        # Result index label
+        self.batch_index_label = QLabel("0 / 0")
+        self.batch_index_label.setAlignment(Qt.AlignCenter)
+        self.batch_index_label.setVisible(False)
+        batch_layout.addWidget(self.batch_index_label)
+        
+        # Stop button
+        self.btn_stop_batch = QPushButton("停止处理")
+        self.btn_stop_batch.clicked.connect(self.stop_batch_inference)
+        self.btn_stop_batch.setEnabled(False)
+        batch_layout.addWidget(self.btn_stop_batch)
+        
+        controls_layout.addWidget(batch_group)
         controls_layout.addStretch()
         
         self.local_display_orig = ImageDisplayWidget("原始图像")
@@ -334,9 +383,14 @@ class MainWindow(QMainWindow):
         theme_color = self.config_manager.get("ui.theme_color", "#007acc")
         theme_mode = self.config_manager.get("ui.theme", "dark")
         
-        qss_file = "ui/styles.qss"
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        qss_file = os.path.join(base_path, "ui/styles.qss")
         if theme_mode == "light":
-            qss_file = "ui/styles_light.qss"
+            qss_file = os.path.join(base_path, "ui/styles_light.qss")
             
         try:
             if os.path.exists(qss_file):
@@ -378,8 +432,11 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
         if folder:
             files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-            for f in files:
-                self.process_local_image(f)
+            if not files:
+                QMessageBox.warning(self, "警告", "文件夹中没有找到图片文件")
+                return
+            
+            self.start_batch_inference(files)
 
     def process_local_image(self, path):
         img = cv2.imread(path)
@@ -493,6 +550,7 @@ class MainWindow(QMainWindow):
             )
             self.mqtt_worker.connection_status.connect(self.update_mqtt_status)
             self.mqtt_worker.frame_processed.connect(self.process_mqtt_result)
+            self.mqtt_worker.log_message.connect(self.log_mqtt_message)
             self.mqtt_worker.start()
             self.btn_connect_mqtt.setText("断开 MQTT")
 
@@ -503,6 +561,11 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_mqtt_status.setText(f"状态: {message}")
             self.lbl_mqtt_status.setStyleSheet("background-color: #dc3545; color: white;")
+
+    def log_mqtt_message(self, message):
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        self.log_table.add_record(timestamp, "MQTT日志", message, "", "")
 
     def process_mqtt_result(self, topic, annotated_frame, detections):
         self.mqtt_display.update_image(annotated_frame)
@@ -596,6 +659,117 @@ class MainWindow(QMainWindow):
         error_dialog.button(QMessageBox.Ok).setText("确定")
         error_dialog.exec()
 
+    # --- Batch Inference Methods ---
+    
+    def start_batch_inference(self, image_paths):
+        if self.batch_inference_thread and self.batch_inference_thread.isRunning():
+            self.batch_inference_thread.stop()
+            self.batch_inference_thread.wait()
+        
+        self.batch_results = []
+        self.current_batch_index = 0
+        
+        device = self.config_manager.get("yolo.device", "cpu")
+        if device == "cuda":
+            device = "cuda"
+        else:
+            device = "cpu"
+        
+        self.batch_inference_thread = BatchInferenceThread(
+            image_paths=image_paths,
+            model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
+            conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
+            classes_dict=self.config_manager.classes,
+            device=device
+        )
+        
+        self.batch_inference_thread.progress_updated.connect(self.on_batch_progress)
+        self.batch_inference_thread.result_ready.connect(self.on_batch_result)
+        self.batch_inference_thread.batch_finished.connect(self.on_batch_finished)
+        self.batch_inference_thread.error_occurred.connect(self.on_batch_error)
+        
+        self.batch_progress.setVisible(True)
+        self.batch_progress_label.setVisible(True)
+        self.batch_index_label.setVisible(True)
+        self.batch_progress.setValue(0)
+        self.batch_progress.setMaximum(len(image_paths))
+        self.batch_progress_label.setText("开始处理...")
+        self.batch_index_label.setText("0 / 0")
+        
+        self.btn_prev_result.setEnabled(False)
+        self.btn_next_result.setEnabled(False)
+        self.btn_stop_batch.setEnabled(True)
+        
+        self.batch_inference_thread.start()
+    
+    def on_batch_progress(self, current, total, message):
+        self.batch_progress.setValue(current)
+        self.batch_progress_label.setText(f"{message} ({current}/{total})")
+    
+    def on_batch_result(self, filename, original_image, annotated_image, detections):
+        result = {
+            'filename': filename,
+            'original_image': original_image,
+            'annotated_image': annotated_image,
+            'detections': detections
+        }
+        self.batch_results.append(result)
+        
+        if len(self.batch_results) == 1:
+            self.current_batch_index = 0
+            self.show_batch_result(0)
+            self.update_batch_navigation()
+        
+        self.batch_index_label.setText(f"{len(self.batch_results)} / {self.batch_progress.maximum()}")
+    
+    def on_batch_finished(self, count):
+        self.batch_progress_label.setText(f"处理完成！共处理 {count} 张图片")
+        self.btn_stop_batch.setEnabled(False)
+        
+        if count > 0:
+            self.update_batch_navigation()
+    
+    def on_batch_error(self, error_message):
+        QMessageBox.warning(self, "批量推理错误", error_message)
+    
+    def stop_batch_inference(self):
+        if self.batch_inference_thread and self.batch_inference_thread.isRunning():
+            self.batch_inference_thread.stop()
+            self.batch_progress_label.setText("处理已停止")
+            self.btn_stop_batch.setEnabled(False)
+    
+    def show_batch_result(self, index):
+        if 0 <= index < len(self.batch_results):
+            result = self.batch_results[index]
+            self.local_display_orig.update_image(result['original_image'])
+            self.local_display_res.update_image(result['annotated_image'])
+            
+            if result['detections']:
+                self.log_result(f"批量推理[{index+1}]", result['detections'])
+    
+    def show_prev_batch_result(self):
+        if self.current_batch_index > 0:
+            self.current_batch_index -= 1
+            self.show_batch_result(self.current_batch_index)
+            self.update_batch_navigation()
+    
+    def show_next_batch_result(self):
+        if self.current_batch_index < len(self.batch_results) - 1:
+            self.current_batch_index += 1
+            self.show_batch_result(self.current_batch_index)
+            self.update_batch_navigation()
+    
+    def update_batch_navigation(self):
+        total = len(self.batch_results)
+        if total > 0:
+            self.batch_index_label.setText(f"{self.current_batch_index + 1} / {total}")
+            self.btn_prev_result.setEnabled(self.current_batch_index > 0)
+            self.btn_next_result.setEnabled(self.current_batch_index < total - 1)
+        else:
+            self.batch_index_label.setText("0 / 0")
+            self.btn_prev_result.setEnabled(False)
+            self.btn_next_result.setEnabled(False)
+
     def closeEvent(self, event):
         if self.video_thread:
             self.video_thread.stop()
@@ -603,4 +777,6 @@ class MainWindow(QMainWindow):
             self.http_thread.stop()
         if self.mqtt_worker:
             self.mqtt_worker.stop()
+        if self.batch_inference_thread:
+            self.batch_inference_thread.stop()
         event.accept()
