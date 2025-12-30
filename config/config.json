@@ -1,7 +1,7 @@
 {
     "mqtt": {
         "mode": "server",
-        "broker": "10.1.2.3",
+        "broker": "192.168.10.41",
         "port": 1883,
         "username": "siot",
         "password": "dfrobot",
@@ -25,7 +25,8 @@
                 "name": "推理消息",
                 "topic": "siot/推理结果"
             }
-        ]
+        ],
+        "auto_connect": false
     },
     "yolo": {
         "model_path": "yolov8n.pt",

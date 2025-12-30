@@ -42,29 +42,32 @@ class MqttWorker(QThread):
         self.running = True
         self.yolo = YoloInference(self.model_path, self.conf_threshold, self.classes_dict, self.device)
         
+        # Connect and loop forever
         self.connection_attempts = 0
         while self.running:
             try:
                 self.connection_attempts += 1
                 self.log_message.emit(f"正在尝试连接 MQTT 服务器 {self.broker}:{self.port} (尝试 {self.connection_attempts})...")
                 
+                # Connect
                 self.client.connect(self.broker, self.port, 60)
-                self.client.loop_start()
                 
-                while self.running and self.client.is_connected():
-                    self.msleep(100)
+                # Loop forever - this blocks until disconnect() is called or error occurs
+                self.client.loop_forever()
                 
-                if self.running and not self.client.is_connected():
-                    self.client.loop_stop()
-                    if self.auto_reconnect and self.connection_attempts < self.max_reconnect_attempts:
-                        self.log_message.emit(f"连接断开，{self.reconnect_interval}秒后重连...")
-                        self.msleep(self.reconnect_interval * 1000)
-                        continue
-                    elif self.connection_attempts >= self.max_reconnect_attempts:
-                        self.log_message.emit(f"已达到最大重连次数 ({self.max_reconnect_attempts})，停止重连")
-                        self.connection_status.emit(False, "连接失败")
-                        break
-                        
+                # If we are here, loop_forever returned
+                if not self.running:
+                    break
+                    
+                # If running is still true but loop returned, maybe connection lost?
+                # Paho loop_forever handles reconnects automatically by default if retry_first_connection=False (default)
+                # But if we want to handle outer retry logic:
+                if self.auto_reconnect and self.connection_attempts < self.max_reconnect_attempts:
+                     self.log_message.emit(f"连接断开，{self.reconnect_interval}秒后重连...")
+                     self.msleep(self.reconnect_interval * 1000)
+                else:
+                     break
+                     
             except Exception as e:
                 self.connection_status.emit(False, f"连接错误: {str(e)}")
                 self.log_message.emit(f"连接异常: {str(e)}")
@@ -72,12 +75,13 @@ class MqttWorker(QThread):
                 if self.auto_reconnect and self.running and self.connection_attempts < self.max_reconnect_attempts:
                     self.log_message.emit(f"{self.reconnect_interval}秒后重连...")
                     self.msleep(self.reconnect_interval * 1000)
-                elif self.connection_attempts >= self.max_reconnect_attempts:
-                    self.log_message.emit(f"已达到最大重连次数 ({self.max_reconnect_attempts})，停止重连")
+                else:
+                    self.log_message.emit("停止重连")
                     break
             finally:
                 if not self.running:
-                    self.client.loop_stop()
+                    self.client.disconnect() # Ensure cleanup
+
 
     def stop(self):
         self.running = False
@@ -113,27 +117,40 @@ class MqttWorker(QThread):
     def on_message(self, client, userdata, msg):
         try:
             payload = msg.payload.decode('utf-8')
-            if "base64," in payload:
-                base64_data = payload.split("base64,")[1]
-            else:
-                base64_data = payload
-
-            base64_data = base64_data.strip()
             
-            missing_padding = len(base64_data) % 4
-            if missing_padding:
-                base64_data += '=' * (4 - missing_padding)
+            # Try to process as image first
+            try:
+                if "base64," in payload:
+                    base64_data = payload.split("base64,")[1]
+                else:
+                    base64_data = payload
 
-            img_data = base64.b64decode(base64_data)
-            nparr = np.frombuffer(img_data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                base64_data = base64_data.strip()
+                
+                # Check if it looks like base64 (simple check)
+                if not base64_data:
+                    raise ValueError("Empty payload")
 
-            if img is not None:
-                if self.yolo:
-                    detections, annotated, _ = self.yolo.predict(img)
-                    self.frame_processed.emit(msg.topic, annotated, detections)
-            else:
-                self.log_message.emit(f"无法解码主题 {msg.topic} 的图片数据")
+                missing_padding = len(base64_data) % 4
+                if missing_padding:
+                    base64_data += '=' * (4 - missing_padding)
+
+                import binascii
+                img_data = base64.b64decode(base64_data, validate=True)
+                nparr = np.frombuffer(img_data, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+                if img is not None:
+                    if self.yolo:
+                        detections, annotated, _ = self.yolo.predict(img)
+                        self.frame_processed.emit(msg.topic, annotated, detections)
+                    return # Successfully processed as image
+            except (binascii.Error, ValueError, cv2.error):
+                # If image decoding fails, assume it is a text message
+                pass
+            
+            # If we are here, it wasn't a valid image, treat as text log
+            self.log_message.emit(f"收到消息 [{msg.topic}]: {payload}")
 
         except Exception as e:
             self.log_message.emit(f"处理主题 {msg.topic} 的消息时出错: {str(e)}")

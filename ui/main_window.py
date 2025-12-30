@@ -804,9 +804,14 @@ class MainWindow(QMainWindow):
             self.log_mqtt_message(f"处理消息时出错: {str(e)}")
 
     def send_manual_mqtt_message(self):
-        """手动发送MQTT消息"""
-        if not self.mqtt_server or not self.mqtt_server.is_running():
-            QMessageBox.warning(self, "错误", "MQTT 服务端未运行")
+        """手动发送MQTT消息 (支持服务端和客户端模式)"""
+        # Check Server
+        is_server_running = self.mqtt_server and self.mqtt_server.is_running()
+        # Check Client
+        is_client_running = self.mqtt_worker and self.mqtt_worker.isRunning()
+        
+        if not is_server_running and not is_client_running:
+            QMessageBox.warning(self, "错误", "MQTT 未连接 (请启动服务端或连接客户端)")
             return
             
         topic = self.edit_pub_topic.text().strip()
@@ -821,8 +826,16 @@ class MainWindow(QMainWindow):
             return
             
         try:
-            self.mqtt_server.publish_message(topic, message)
-            self.log_mqtt_message(f"手动发送 - 主题: {topic}, 内容: {message}")
+            if is_server_running:
+                self.mqtt_server.publish_message(topic, message)
+                self.log_mqtt_message(f"[服务端] 手动发送 - 主题: {topic}, 内容: {message}")
+            elif is_client_running:
+                self.mqtt_worker.publish_message(topic, message)
+                # Client worker logs its own message usually, but let's double check or rely on worker's signal
+                # core/mqtt_worker.py: self.log_message.emit(f"消息已发布到主题: {topic}")
+                # So we might duplicate log if we log here too. But let's log specifically "Manual Send"
+                self.log_mqtt_message(f"[客户端] 手动发送 - 主题: {topic}, 内容: {message}")
+
             self.edit_pub_message.clear() # Optional: clear message after send
         except Exception as e:
             QMessageBox.critical(self, "错误", f"发送失败: {str(e)}")
