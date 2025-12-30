@@ -24,6 +24,7 @@ class YoloInference:
         try:
             self.model = YOLO(self.model_path)
             self.model.to(self.device)
+            print(f"[YoloInference] 模型已加载，使用设备: {self.device}")
         except Exception as e:
             if self.device != "cpu":
                 raise Exception(f"GPU初始化失败: {str(e)}")

@@ -13,8 +13,10 @@ import json
 from core.config_manager import ConfigManager
 from core.inference import YoloInference
 from core.mqtt_worker import MqttWorker
+from core.mqtt_server import MqttServer
 from core.video_thread import VideoThread
 from core.batch_inference_thread import BatchInferenceThread
+from core.mqtt_inference_thread import MqttInferenceThread
 from ui.widgets import ImageDisplayWidget, LogTableWidget
 
 class MainWindow(QMainWindow):
@@ -28,7 +30,8 @@ class MainWindow(QMainWindow):
         self.yolo = YoloInference(
             model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
             conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
-            classes_dict=self.config_manager.classes
+            classes_dict=self.config_manager.classes,
+            device=self.config_manager.get("yolo.device", "cpu")
         )
 
         # Workers
@@ -40,6 +43,10 @@ class MainWindow(QMainWindow):
         # Batch inference data
         self.batch_results = []
         self.current_batch_index = 0
+
+        # MQTT Workers
+        self.mqtt_worker = None
+        self.mqtt_inference_thread = None  # Server mode inference thread
 
         # Predefined Themes
         self.color_themes = [
@@ -208,7 +215,11 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(self.mqtt_tab)
         
         controls_layout = QHBoxLayout()
-        self.btn_connect_mqtt = QPushButton("连接 MQTT")
+        mqtt_mode = self.config_manager.get("mqtt.mode", "client")
+        if mqtt_mode == "server":
+            self.btn_connect_mqtt = QPushButton("启动 MQTT 服务端")
+        else:
+            self.btn_connect_mqtt = QPushButton("连接 MQTT")
         self.btn_connect_mqtt.clicked.connect(self.toggle_mqtt)
         self.lbl_mqtt_status = QPushButton("状态: 未连接")
         self.lbl_mqtt_status.setEnabled(False)
@@ -222,12 +233,74 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(controls_layout)
         layout.addWidget(self.mqtt_display)
+        
+        self.mqtt_log_text = QTableWidget()
+        self.mqtt_log_text.setColumnCount(2)
+        self.mqtt_log_text.setHorizontalHeaderLabels(["时间", "消息"])
+        self.mqtt_log_text.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.mqtt_log_text.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.mqtt_log_text.verticalHeader().setVisible(False)
+        self.mqtt_log_text.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.mqtt_log_text.setMaximumHeight(150)
+        
+        layout.addWidget(self.mqtt_log_text)
+        
+        self.mqtt_log_counter = 0
+        
+        # Initialize MQTT server
+        self.mqtt_server = None
 
     def setup_settings_tab(self):
         layout = QVBoxLayout(self.settings_tab)
         
-        # Connection Settings
-        form_layout = QFormLayout()
+        # MQTT Settings Group
+        mqtt_group = QGroupBox("MQTT 设置")
+        mqtt_layout = QVBoxLayout(mqtt_group)
+        
+        # MQTT Mode Selection (Server/Client)
+        mode_layout = QHBoxLayout()
+        self.radio_mqtt_client = QRadioButton("客户端模式 (连接到服务器)")
+        self.radio_mqtt_server = QRadioButton("服务端模式 (作为MQTT Broker)")
+        
+        self.mqtt_mode_button_group = QButtonGroup()
+        self.mqtt_mode_button_group.addButton(self.radio_mqtt_client, 0)
+        self.mqtt_mode_button_group.addButton(self.radio_mqtt_server, 1)
+        
+        current_mqtt_mode = self.config_manager.get("mqtt.mode", "client")
+        if current_mqtt_mode == "server":
+            self.radio_mqtt_server.setChecked(True)
+        else:
+            self.radio_mqtt_client.setChecked(True)
+        
+        self.radio_mqtt_client.toggled.connect(self.on_mqtt_mode_changed)
+        self.radio_mqtt_server.toggled.connect(self.on_mqtt_mode_changed)
+        
+        mode_layout.addWidget(self.radio_mqtt_client)
+        mode_layout.addWidget(self.radio_mqtt_server)
+        mode_layout.addStretch()
+        mqtt_layout.addLayout(mode_layout)
+        
+        # Client Mode Settings
+        self.client_settings_widget = QWidget()
+        client_form_layout = QFormLayout(self.client_settings_widget)
+        
+        # MQTT Server Presets
+        mqtt_server_layout = QHBoxLayout()
+        self.combo_mqtt_server = QComboBox()
+        self.combo_mqtt_server.addItem("自定义", "custom")
+        self.combo_mqtt_server.addItem("本地服务器 (127.0.0.1)", "local")
+        self.combo_mqtt_server.addItem("远程服务器 (10.1.2.3)", "remote")
+        self.combo_mqtt_server.currentIndexChanged.connect(self.on_mqtt_server_changed)
+        
+        self.btn_test_mqtt = QPushButton("测试连接")
+        self.btn_test_mqtt.clicked.connect(self.test_mqtt_connection)
+        
+        mqtt_server_layout.addWidget(QLabel("服务器预设:"))
+        mqtt_server_layout.addWidget(self.combo_mqtt_server, 1)
+        mqtt_server_layout.addWidget(self.btn_test_mqtt)
+        
+        client_form_layout.addRow(mqtt_server_layout)
+        
         self.edit_broker = QLineEdit(self.config_manager.get("mqtt.broker"))
         self.edit_port = QSpinBox()
         self.edit_port.setRange(1, 65535)
@@ -237,12 +310,32 @@ class MainWindow(QMainWindow):
         self.edit_pass = QLineEdit(self.config_manager.get("mqtt.password", ""))
         self.edit_pass.setEchoMode(QLineEdit.Password)
         
-        form_layout.addRow("MQTT 服务器:", self.edit_broker)
-        form_layout.addRow("MQTT 端口:", self.edit_port)
-        form_layout.addRow("MQTT 用户名:", self.edit_user)
-        form_layout.addRow("MQTT 密码:", self.edit_pass)
+        client_form_layout.addRow("MQTT 服务器:", self.edit_broker)
+        client_form_layout.addRow("MQTT 端口:", self.edit_port)
+        client_form_layout.addRow("MQTT 用户名:", self.edit_user)
+        client_form_layout.addRow("MQTT 密码:", self.edit_pass)
         
-        layout.addLayout(form_layout)
+        mqtt_layout.addWidget(self.client_settings_widget)
+        
+        # Server Mode Settings
+        self.server_settings_widget = QWidget()
+        server_form_layout = QFormLayout(self.server_settings_widget)
+        
+        self.edit_server_port = QSpinBox()
+        self.edit_server_port.setRange(1, 65535)
+        self.edit_server_port.setValue(self.config_manager.get("mqtt.server_port", 1883))
+        
+        self.edit_server_host = QLineEdit(self.config_manager.get("mqtt.server_host", "0.0.0.0"))
+        
+        server_form_layout.addRow("监听地址:", self.edit_server_host)
+        server_form_layout.addRow("监听端口:", self.edit_server_port)
+        
+        mqtt_layout.addWidget(self.server_settings_widget)
+        
+        # Show/hide settings based on mode
+        self.on_mqtt_mode_changed()
+        
+        layout.addWidget(mqtt_group)
         
         # Inference Settings
         inf_group = QGroupBox("推理设置")
@@ -254,6 +347,11 @@ class MainWindow(QMainWindow):
         self.spin_conf.setValue(self.config_manager.get("yolo.conf_threshold", 0.5))
         
         inf_layout.addRow("置信度阈值:", self.spin_conf)
+        
+        self.edit_model_name = QLineEdit()
+        self.edit_model_name.setPlaceholderText("例如: best.pt")
+        self.edit_model_name.setText(self.config_manager.get("yolo.model_path", "best.pt"))
+        inf_layout.addRow("模型名称:", self.edit_model_name)
         
         # Device Selection (GPU/CPU)
         device_group = QGroupBox("硬件加速")
@@ -457,7 +555,8 @@ class MainWindow(QMainWindow):
             self.video_thread = VideoThread(
                 model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
                 conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
-                classes_dict=self.config_manager.classes
+                classes_dict=self.config_manager.classes,
+                device=self.config_manager.get("yolo.device", "cpu")
             )
             self.video_thread.frame_processed.connect(self.process_camera_result)
             self.video_thread.connection_status.connect(self.on_camera_status)
@@ -481,6 +580,15 @@ class MainWindow(QMainWindow):
         self.cam_display.update_image(annotated_frame)
         if detections:
             self.log_result("摄像头", detections)
+        
+        if self.mqtt_worker and self.mqtt_worker.isRunning():
+            try:
+                import base64
+                _, buffer = cv2.imencode('.jpg', annotated_frame)
+                img_base64 = base64.b64encode(buffer).decode('utf-8')
+                self.mqtt_worker.publish_message("siot/摄像头", img_base64)
+            except Exception as e:
+                pass
 
     # HTTP Camera
     def toggle_http_camera(self):
@@ -501,7 +609,8 @@ class MainWindow(QMainWindow):
                 camera_id=url,
                 model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
                 conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
-                classes_dict=self.config_manager.classes
+                classes_dict=self.config_manager.classes,
+                device=self.config_manager.get("yolo.device", "cpu")
             )
             self.http_thread.frame_processed.connect(self.process_http_result)
             self.http_thread.connection_status.connect(self.on_http_status)
@@ -530,29 +639,118 @@ class MainWindow(QMainWindow):
 
     # MQTT
     def toggle_mqtt(self):
-        if self.mqtt_worker and self.mqtt_worker.isRunning():
-            self.mqtt_worker.stop()
-            self.btn_connect_mqtt.setText("连接 MQTT")
-            self.lbl_mqtt_status.setText("状态: 未连接")
-            self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+        mqtt_mode = self.config_manager.get("mqtt.mode", "client")
+        
+        if mqtt_mode == "server":
+            if self.mqtt_server and self.mqtt_server.is_running():
+                self.mqtt_server.stop()
+                if self.mqtt_inference_thread:
+                    self.mqtt_inference_thread.stop()
+                self.btn_connect_mqtt.setText("启动 MQTT 服务端")
+                self.lbl_mqtt_status.setText("状态: 已停止")
+                self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+            else:
+                host = self.config_manager.get("mqtt.server_host", "0.0.0.0")
+                port = self.config_manager.get("mqtt.server_port", 1883)
+                
+                # Start Inference Thread
+                self.mqtt_inference_thread = MqttInferenceThread(
+                    model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
+                    conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
+                    classes_dict=self.config_manager.classes,
+                    device=self.config_manager.get("yolo.device", "cpu")
+                )
+                self.mqtt_inference_thread.inference_finished.connect(self.on_mqtt_inference_finished)
+                self.mqtt_inference_thread.error_occurred.connect(lambda err: self.log_mqtt_message(f"推理错误: {err}"))
+                self.mqtt_inference_thread.start()
+
+                self.mqtt_server = MqttServer(host=host, port=port)
+                self.mqtt_server.server_started.connect(self.on_mqtt_server_started)
+                self.mqtt_server.server_stopped.connect(self.on_mqtt_server_stopped)
+                self.mqtt_server.client_connected.connect(self.on_mqtt_client_connected)
+                self.mqtt_server.client_disconnected.connect(self.on_mqtt_client_disconnected)
+                self.mqtt_server.message_received.connect(self.on_mqtt_server_message)
+                self.mqtt_server.image_data_received.connect(self.on_mqtt_server_image_data)
+                self.mqtt_server.log_message.connect(self.log_mqtt_message)
+                self.mqtt_server.start()
+                self.btn_connect_mqtt.setText("正在启动...")
         else:
-            broker = self.config_manager.get("mqtt.broker")
-            port = self.config_manager.get("mqtt.port")
-            topics = self.config_manager.get("mqtt.topics")
-            username = self.config_manager.get("mqtt.username")
-            password = self.config_manager.get("mqtt.password")
+            if self.mqtt_worker and self.mqtt_worker.isRunning():
+                self.mqtt_worker.stop()
+                self.btn_connect_mqtt.setText("连接 MQTT")
+                self.lbl_mqtt_status.setText("状态: 未连接")
+                self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+            else:
+                broker = self.config_manager.get("mqtt.broker")
+                port = self.config_manager.get("mqtt.port")
+                topics = self.config_manager.get("mqtt.topics")
+                username = self.config_manager.get("mqtt.username")
+                password = self.config_manager.get("mqtt.password")
+                
+                self.mqtt_worker = MqttWorker(
+                    broker, port, topics, username, password,
+                    model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
+                    conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
+                    classes_dict=self.config_manager.classes,
+                    device=self.config_manager.get("yolo.device", "cpu")
+                )
+                self.mqtt_worker.connection_status.connect(self.update_mqtt_status)
+                self.mqtt_worker.frame_processed.connect(self.process_mqtt_result)
+                self.mqtt_worker.log_message.connect(self.log_mqtt_message)
+                self.mqtt_worker.start()
+                self.btn_connect_mqtt.setText("断开 MQTT")
+    
+    def on_mqtt_server_started(self, port):
+        self.btn_connect_mqtt.setText("停止 MQTT 服务端")
+        self.lbl_mqtt_status.setText(f"状态: 服务端运行中 (端口: {port})")
+        self.lbl_mqtt_status.setStyleSheet("background-color: #28a745; color: white;")
+    
+    def on_mqtt_server_stopped(self):
+        self.btn_connect_mqtt.setText("启动 MQTT 服务端")
+        self.lbl_mqtt_status.setText("状态: 已停止")
+        self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+    
+    def on_mqtt_client_connected(self, client_id, port):
+        self.log_mqtt_message(f"客户端 {client_id} 已连接 (端口: {port})")
+    
+    def on_mqtt_client_disconnected(self, client_id, port):
+        self.log_mqtt_message(f"客户端 {client_id} 已断开 (端口: {port})")
+    
+    def on_mqtt_server_image_data(self, client_id, image_bytes):
+        #self.log_mqtt_message(f"收到图像数据，字节长度: {len(image_bytes)}")
+        print("收到图像数据，字节长度: ", len(image_bytes))
+        if self.mqtt_inference_thread:
+            self.mqtt_inference_thread.update_frame(image_bytes)
+
+    def on_mqtt_inference_finished(self, annotated_frame, detections):
+        print(f"[MainWindow] Signal received. Detections: {len(detections)}")
+        self.mqtt_display.update_image(annotated_frame)
+        # self.log_mqtt_message("图像已更新到显示区域") # Reduce log spam
+        print("图像已更新到显示区域")
+        if detections:
+            self.log_result("MQTT服务端 (摄像头)", detections)
+    
+    def on_mqtt_server_message(self, topic, payload, client_id):
+        if topic == "siot/摄像头":
+            return
             
-            self.mqtt_worker = MqttWorker(
-                broker, port, topics, username, password,
-                model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
-                conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
-                classes_dict=self.config_manager.classes
-            )
-            self.mqtt_worker.connection_status.connect(self.update_mqtt_status)
-            self.mqtt_worker.frame_processed.connect(self.process_mqtt_result)
-            self.mqtt_worker.log_message.connect(self.log_mqtt_message)
-            self.mqtt_worker.start()
-            self.btn_connect_mqtt.setText("断开 MQTT")
+        self.log_mqtt_message(f"来自 {client_id} 的消息 - 主题: {topic}, 内容: {payload}")
+        
+        import base64
+        import numpy as np
+        
+        try:
+            image_data = base64.b64decode(payload)
+            nparr = np.frombuffer(image_data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is not None:
+                detections, annotated_frame, _ = self.yolo.predict(frame)
+                self.mqtt_display.update_image(annotated_frame)
+                if detections:
+                    self.log_result(f"MQTT服务端 ({topic})", detections)
+        except Exception as e:
+            self.log_mqtt_message(f"处理消息时出错: {str(e)}")
 
     def update_mqtt_status(self, connected, message):
         if connected:
@@ -565,11 +763,25 @@ class MainWindow(QMainWindow):
     def log_mqtt_message(self, message):
         import datetime
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        self.log_table.add_record(timestamp, "MQTT日志", message, "", "")
+        self.mqtt_log_counter += 1
+        row = self.mqtt_log_text.rowCount()
+        self.mqtt_log_text.insertRow(row)
+        
+        item0 = QTableWidgetItem(str(timestamp))
+        item1 = QTableWidgetItem(message)
+        
+        self.mqtt_log_text.setItem(row, 0, item0)
+        self.mqtt_log_text.setItem(row, 1, item1)
+        
+        if self.mqtt_log_counter > 100:
+            self.mqtt_log_text.removeRow(0)
+            self.mqtt_log_counter -= 1
+        
+        self.mqtt_log_text.scrollToBottom()
 
     def process_mqtt_result(self, topic, annotated_frame, detections):
         self.mqtt_display.update_image(annotated_frame)
-        if detections:
+        if detections and topic != "siot/摄像头":
             self.log_result(f"MQTT ({topic})", detections)
 
     # Settings
@@ -582,10 +794,19 @@ class MainWindow(QMainWindow):
             self.lbl_gpu_check.setVisible(True)
     
     def save_settings(self):
+        # Save MQTT Mode
+        mqtt_mode = "server" if self.radio_mqtt_server.isChecked() else "client"
+        self.config_manager.set("mqtt.mode", mqtt_mode)
+        
+        # Save MQTT Client Settings
         self.config_manager.set("mqtt.broker", self.edit_broker.text())
         self.config_manager.set("mqtt.port", self.edit_port.value())
         self.config_manager.set("mqtt.username", self.edit_user.text())
         self.config_manager.set("mqtt.password", self.edit_pass.text())
+        
+        # Save MQTT Server Settings
+        self.config_manager.set("mqtt.server_host", self.edit_server_host.text())
+        self.config_manager.set("mqtt.server_port", self.edit_server_port.value())
         
         # Save Inference Settings
         new_conf = self.spin_conf.value()
@@ -599,29 +820,109 @@ class MainWindow(QMainWindow):
         new_device = "cpu" if self.radio_cpu.isChecked() else "cuda"
         old_device = self.config_manager.get("yolo.device", "cpu")
         
+        # Save Model Path
+        new_model_path = self.edit_model_name.text().strip()
+        if not new_model_path:
+            new_model_path = "best.pt" # Default
+            self.edit_model_name.setText(new_model_path)
+            
+        old_model_path = self.config_manager.get("yolo.model_path", "best.pt")
+        
+        need_restart_threads = False
+        
+        # Check if Model or Device changed
+        if new_model_path != old_model_path:
+            self.config_manager.set("yolo.model_path", new_model_path)
+            if self.yolo:
+                self.yolo.model_path = os.path.join(os.path.dirname(self.yolo.model_path), new_model_path)
+                # Re-init will happen below if device also changes, or we force it
+                need_restart_threads = True
+                print(f"[Settings] 模型名称已更改: {old_model_path} -> {new_model_path}")
+
         if new_device != old_device:
             self.config_manager.set("yolo.device", new_device)
+            need_restart_threads = True
             
-            # Try to switch device
+            # Try to switch device for local instance
             if new_device == "cuda":
                 try:
                     self.yolo.set_device(new_device)
-                    QMessageBox.information(self, "硬件加速", "GPU加速已启用！")
+                    QMessageBox.information(self, "硬件加速", "GPU加速已启用！\n相关后台线程将自动重启以应用新设置。")
                     self.lbl_gpu_check.setVisible(True)
                     self.lbl_cpu_check.setVisible(False)
                 except Exception as e:
-                    # GPU initialization failed, show error dialog and switch back to CPU
                     self.show_gpu_error_dialog(str(e))
                     self.radio_cpu.setChecked(True)
                     self.config_manager.set("yolo.device", "cpu")
                     self.yolo.set_device("cpu")
                     self.lbl_cpu_check.setVisible(True)
                     self.lbl_gpu_check.setVisible(False)
+                    new_device = "cpu"
+                    need_restart_threads = False # Cancel restart if failed (or restart with cpu?)
+                    # If model changed but GPU failed, we still might want to restart threads with CPU
+                    if new_model_path != old_model_path:
+                         need_restart_threads = True
             else:
                 self.yolo.set_device(new_device)
-                QMessageBox.information(self, "硬件加速", "已切换至CPU运行模式！")
+                QMessageBox.information(self, "硬件加速", "已切换至CPU运行模式！\n相关后台线程将自动重启以应用新设置。")
                 self.lbl_cpu_check.setVisible(True)
                 self.lbl_gpu_check.setVisible(False)
+        
+        # Re-initialize local model if only model path changed (and device didn't trigger init logic above)
+        if new_model_path != old_model_path and new_device == old_device:
+             if self.yolo:
+                 # Need to reconstruct full path logic roughly or just trust relative
+                 # Inference class handles relative paths well usually if cwd is correct
+                 # But YoloInference does: os.path.join(base_path, model_path)
+                 self.yolo.model_path = new_model_path # YoloInference handles join internally if we pass to init, but here we are setting attr
+                 # Actually self.yolo.model_path in __init__ stores the FULL path. 
+                 # We need to be careful. 
+                 # Let's just re-instantiate or call init_model? 
+                 # The init_model uses self.model_path. 
+                 # We need to update self.model_path to the full path.
+                 
+                 # Simpler: Just make YoloInference reload from the filename
+                 # But YoloInference.__init__ calculates base_path. 
+                 # We can hack it or add a method. 
+                 # For now, let's just use the logic from __init__ roughly:
+                 if getattr(sys, 'frozen', False):
+                    base_path = sys._MEIPASS
+                 else:
+                    base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                 self.yolo.model_path = os.path.join(base_path, new_model_path)
+                 
+                 self.yolo.init_model()
+                 QMessageBox.information(self, "模型设置", f"模型已切换为: {new_model_path}")
+
+
+        if need_restart_threads:
+            # Restart MqttInferenceThread if running
+            if self.mqtt_inference_thread and self.mqtt_inference_thread.isRunning():
+                print(f"[Settings] 重启 MQTT 推理线程以应用新设置")
+                self.mqtt_inference_thread.stop()
+                self.mqtt_inference_thread.wait() # Ensure it stops
+                # Re-create and start
+                self.mqtt_inference_thread = MqttInferenceThread(
+                    model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
+                    conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
+                    classes_dict=self.config_manager.classes,
+                    device=self.config_manager.get("yolo.device", "cpu")
+                )
+                self.mqtt_inference_thread.inference_finished.connect(self.on_mqtt_inference_finished)
+                self.mqtt_inference_thread.error_occurred.connect(lambda err: self.log_mqtt_message(f"推理错误: {err}"))
+                self.mqtt_inference_thread.start()
+                
+            # Restart VideoThread if running (Local Camera)
+            if self.video_thread and self.video_thread.isRunning():
+                 print(f"[Settings] 重启摄像头线程以应用新设置")
+                 self.on_btn_start_cam_clicked() # Stop
+                 self.on_btn_start_cam_clicked() # Start (will read new config)
+            
+            # Restart HTTP Thread if running
+            if self.http_thread and self.http_thread.isRunning():
+                 print(f"[Settings] 重启HTTP监控线程以应用新设置")
+                 self.on_btn_start_http_clicked() # Stop
+                 self.on_btn_start_http_clicked() # Start
             
         # Save UI Settings
         new_mode = "dark" if self.combo_mode.currentIndex() == 0 else "light"
@@ -770,6 +1071,88 @@ class MainWindow(QMainWindow):
             self.btn_prev_result.setEnabled(False)
             self.btn_next_result.setEnabled(False)
 
+    # --- MQTT Helper Methods ---
+    
+    def on_mqtt_mode_changed(self):
+        if self.radio_mqtt_server.isChecked():
+            self.client_settings_widget.setVisible(False)
+            self.server_settings_widget.setVisible(True)
+            self.config_manager.set("mqtt.mode", "server")
+            if hasattr(self, 'btn_connect_mqtt'):
+                self.btn_connect_mqtt.setText("启动 MQTT 服务端")
+                self.lbl_mqtt_status.setText("状态: 未启动")
+                self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+        else:
+            self.client_settings_widget.setVisible(True)
+            self.server_settings_widget.setVisible(False)
+            self.config_manager.set("mqtt.mode", "client")
+            if hasattr(self, 'btn_connect_mqtt'):
+                self.btn_connect_mqtt.setText("连接 MQTT")
+                self.lbl_mqtt_status.setText("状态: 未连接")
+                self.lbl_mqtt_status.setStyleSheet("background-color: #555; color: white;")
+    
+    def on_mqtt_server_changed(self, index):
+        server_type = self.combo_mqtt_server.currentData()
+        
+        if server_type == "local":
+            self.edit_broker.setText("127.0.0.1")
+            self.edit_port.setValue(1883)
+            self.edit_user.setText("")
+            self.edit_pass.setText("")
+        elif server_type == "remote":
+            self.edit_broker.setText("10.1.2.3")
+            self.edit_port.setValue(1883)
+            self.edit_user.setText("siot")
+            self.edit_pass.setText("dfrobot")
+    
+    def test_mqtt_connection(self):
+        broker = self.edit_broker.text().strip()
+        port = self.edit_port.value()
+        username = self.edit_user.text().strip()
+        password = self.edit_pass.text().strip()
+        
+        if not broker:
+            QMessageBox.warning(self, "错误", "请输入MQTT服务器地址")
+            return
+        
+        self.btn_test_mqtt.setEnabled(False)
+        self.btn_test_mqtt.setText("测试中...")
+        
+        import paho.mqtt.client as mqtt
+        test_client = mqtt.Client()
+        
+        if username and password:
+            test_client.username_pw_set(username, password)
+        
+        def on_connect(client, userdata, flags, rc):
+            client.disconnect()
+        
+        test_client.on_connect = on_connect
+        
+        try:
+            test_client.connect(broker, port, 5)
+            test_client.loop_start()
+            
+            import time
+            timeout = 5
+            start_time = time.time()
+            
+            while not test_client.is_connected() and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+            
+            test_client.loop_stop()
+            
+            if test_client.is_connected():
+                QMessageBox.information(self, "测试成功", f"成功连接到MQTT服务器\n\n服务器: {broker}\n端口: {port}")
+            else:
+                QMessageBox.warning(self, "测试失败", f"无法连接到MQTT服务器\n\n服务器: {broker}\n端口: {port}\n\n请检查:\n1. 服务器地址是否正确\n2. 网络连接是否正常\n3. 服务器是否正在运行")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "测试错误", f"连接测试时发生错误:\n\n{str(e)}")
+        finally:
+            self.btn_test_mqtt.setEnabled(True)
+            self.btn_test_mqtt.setText("测试连接")
+
     def closeEvent(self, event):
         if self.video_thread:
             self.video_thread.stop()
@@ -777,6 +1160,8 @@ class MainWindow(QMainWindow):
             self.http_thread.stop()
         if self.mqtt_worker:
             self.mqtt_worker.stop()
+        if self.mqtt_inference_thread:
+            self.mqtt_inference_thread.stop()
         if self.batch_inference_thread:
             self.batch_inference_thread.stop()
         event.accept()

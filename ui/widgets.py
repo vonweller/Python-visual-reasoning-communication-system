@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, 
-                               QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt
+                               QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QImage, QPixmap
 import cv2
 
@@ -43,6 +43,8 @@ class LogTableWidget(QTableWidget):
         self.verticalHeader().setVisible(False)
         self.setEditTriggers(QTableWidget.NoEditTriggers)
         self.setSelectionBehavior(QTableWidget.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setWordWrap(True)
         self.counter = 0
 
     def add_record(self, timestamp, source, class_name_en, class_name_cn, confidence):
@@ -50,18 +52,22 @@ class LogTableWidget(QTableWidget):
         row = self.rowCount()
         self.insertRow(row)
         
-        # Format: 《第X次：推理结果》
-        # Actually user asked for specific format in the record, maybe I should add a column or format the first column?
-        # Requirement: "每条记录格式遵循"《第X次：推理结果》"的规范"
-        # I will interpret this as a log entry prefix or title, but for a table, columns are better.
-        # Let's stick to columns but maybe add a tooltip or status log with that format.
-        # Or I can make the first column "ID" with that format.
+        item0 = QTableWidgetItem(str(timestamp))
+        item1 = QTableWidgetItem(source)
+        item2 = QTableWidgetItem(class_name_en)
+        item3 = QTableWidgetItem(class_name_cn)
         
-        id_str = f"《第{self.counter}次：推理结果》"
+        try:
+            confidence_float = float(confidence)
+            item4 = QTableWidgetItem(f"{confidence_float:.2f}")
+        except (ValueError, TypeError):
+            item4 = QTableWidgetItem(str(confidence))
         
-        self.setItem(row, 0, QTableWidgetItem(str(timestamp)))
-        self.setItem(row, 1, QTableWidgetItem(source))
-        self.setItem(row, 2, QTableWidgetItem(class_name_en))
-        self.setItem(row, 3, QTableWidgetItem(class_name_cn))
-        self.setItem(row, 4, QTableWidgetItem(f"{confidence:.2f}"))
+        self.setItem(row, 0, item0)
+        self.setItem(row, 1, item1)
+        self.setItem(row, 2, item2)
+        self.setItem(row, 3, item3)
+        self.setItem(row, 4, item4)
+        
+        self.resizeRowToContents(row)
         self.scrollToBottom()

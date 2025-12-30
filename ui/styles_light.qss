@@ -66,3 +66,39 @@ QHeaderView::section {
     border: none;
     color: #000000;
 }
+
+QSplitter::handle {
+    background-color: #cccccc;
+}
+
+QSplitter::handle:vertical {
+    height: 6px;
+    image: none;
+}
+
+QSplitter::handle:horizontal {
+    width: 6px;
+    image: none;
+}
+
+QSplitter::handle:hover {
+    background-color: #007acc;
+}
+
+QSplitter::handle:pressed {
+    background-color: #005c99;
+}
+
+QGroupBox {
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 8px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    color: #000000;
+}

@@ -1,10 +1,13 @@
 {
     "mqtt": {
+        "mode": "server",
         "broker": "10.1.2.3",
         "port": 1883,
         "username": "siot",
         "password": "dfrobot",
         "publish_topic": "siot/推理结果",
+        "server_host": "0.0.0.0",
+        "server_port": 1883,
         "topics": [
             {
                 "name": "舵机",
@@ -21,8 +24,8 @@
         ]
     },
     "yolo": {
-        "model_path": "best.pt",
-        "conf_threshold": 0.88,
+        "model_path": "yolov8n.pt",
+        "conf_threshold": 0.8,
         "http_stream_url": "http://192.168.10.43:81/stream",
         "device": "cpu"
     },
