@@ -26,7 +26,7 @@ class MainWindow(QMainWindow):
         # Load Config
         self.config_manager = ConfigManager()
         
-        window_title = self.config_manager.get("ui.window_title", "基于YOLOv12的氮磷钾农作物需求识别系统")
+        window_title = self.config_manager.get("ui.window_title", "Vonwell的MQTT科创本地云端摄像头推理面板BYQQ529538187")
         self.setWindowTitle(window_title)
         
         self.resize(1200, 800)
@@ -445,7 +445,7 @@ class MainWindow(QMainWindow):
         
         # Window Title
         self.edit_window_title = QLineEdit()
-        self.edit_window_title.setText(self.config_manager.get("ui.window_title", "基于YOLOv12的氮磷钾农作物需求识别系统"))
+        self.edit_window_title.setText(self.config_manager.get("ui.window_title", "Vonwell的MQTT科创本地云端摄像头推理面板BYQQ529538187"))
         self.edit_window_title.setPlaceholderText("请输入窗口标题")
         
         # Theme Color
