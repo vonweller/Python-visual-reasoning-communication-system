@@ -22,11 +22,16 @@ from ui.widgets import ImageDisplayWidget, LogTableWidget
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("基于YOLOv12的氮磷钾农作物需求识别系统")
-        self.resize(1200, 800)
-
+        
         # Load Config
         self.config_manager = ConfigManager()
+        
+        window_title = self.config_manager.get("ui.window_title", "基于YOLOv12的氮磷钾农作物需求识别系统")
+        self.setWindowTitle(window_title)
+        
+        self.resize(1200, 800)
+
+        # Initialize Yolo
         self.yolo = YoloInference(
             model_path=self.config_manager.get("yolo.model_path", "yolov8n.pt"),
             conf_threshold=self.config_manager.get("yolo.conf_threshold", 0.5),
@@ -110,8 +115,10 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.tabs)
         splitter.addWidget(log_group)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
+        
+        # Set explicitly logical sizes to ensure log area is visible enough
+        # assuming total height ~800. 500 for tabs, 300 for logs.
+        splitter.setSizes([500, 300])
         
         main_layout.addWidget(splitter)
 
@@ -436,6 +443,11 @@ class MainWindow(QMainWindow):
         current_mode = self.config_manager.get("ui.theme", "dark")
         self.combo_mode.setCurrentIndex(0 if current_mode == "dark" else 1)
         
+        # Window Title
+        self.edit_window_title = QLineEdit()
+        self.edit_window_title.setText(self.config_manager.get("ui.window_title", "基于YOLOv12的氮磷钾农作物需求识别系统"))
+        self.edit_window_title.setPlaceholderText("请输入窗口标题")
+        
         # Theme Color
         self.combo_color = QComboBox()
         current_color = self.config_manager.get("ui.theme_color", "#007acc")
@@ -451,6 +463,8 @@ class MainWindow(QMainWindow):
             self.combo_color.setCurrentIndex(0)
         
         ui_layout.addRow("界面模式:", self.combo_mode)
+        ui_layout.addRow("主题颜色:", self.combo_color)
+        ui_layout.addRow("窗口标题:", self.edit_window_title)
         ui_layout.addRow("主题颜色:", self.combo_color)
         layout.addWidget(ui_group)
         
@@ -872,6 +886,15 @@ class MainWindow(QMainWindow):
         # Save Inference Settings
         new_conf = self.spin_conf.value()
         self.config_manager.set("yolo.conf_threshold", new_conf)
+        
+        # Save UI Settings
+        self.config_manager.set("ui.theme_color", self.combo_color.currentData())
+        
+        # Save Window Title
+        new_title = self.edit_window_title.text().strip()
+        if new_title:
+             self.config_manager.set("ui.window_title", new_title)
+             self.setWindowTitle(new_title)
         
         # Update local instance immediately
         if self.yolo:
