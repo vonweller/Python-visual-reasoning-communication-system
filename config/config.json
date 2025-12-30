@@ -20,13 +20,17 @@
             {
                 "name": "摄像头",
                 "topic": "siot/摄像头"
+            },
+            {
+                "name": "推理消息",
+                "topic": "siot/推理结果"
             }
         ]
     },
     "yolo": {
         "model_path": "yolov8n.pt",
         "conf_threshold": 0.8,
-        "http_stream_url": "http://192.168.10.43:81/stream",
+        "http_stream_url": "http://192.168.10.48:81/stream",
         "device": "cpu"
     },
     "ui": {

@@ -180,7 +180,8 @@ class MqttServer(QThread):
             while self.running and self.clients.get(client_id, {}).get('connected', False):
                 try:
                     client_socket.settimeout(0.1)
-                    data = client_socket.recv(65536)
+                    # 增大接收缓冲区以更好地处理Base64图片大包
+                    data = client_socket.recv(262144) # 256KB
                     
                     if not data:
                         break
@@ -356,11 +357,15 @@ class MqttServer(QThread):
                 payload_str = None
             
             if topic != "siot/摄像头":
-                self.safe_log(f"收到PUBLISH - 主题: {topic}, 载荷长度: {len(payload)}")
+                content_show = payload_str if payload_str else f"<Binary data, len={len(payload)}>"
+                self.safe_log(f"收到PUBLISH - 主题: {topic}, 内容: {content_show}")
             
             # 处理摄像头主题
-            if topic == "siot/摄像头" and payload_str:
-                self.process_camera_image(client_id, topic, payload_str)
+            # 处理摄像头主题
+            if topic == "siot/摄像头":
+                # 即使UTF-8解码失败，也尝试处理（可能是Raw Binary）
+                print("处理摄像头主题")
+                self.process_camera_image(client_id, topic, payload)
             elif payload_str:
                 # 发送消息到UI
                 self.message_received.emit(topic, payload_str, client_id)
@@ -373,29 +378,46 @@ class MqttServer(QThread):
             import traceback
             self.safe_log(f"详细错误: {traceback.format_exc()}")
 
-    def process_camera_image(self, client_id, topic, payload_str):
-        """处理摄像头图像数据"""
+    def process_camera_image(self, client_id, topic, payload):
+        """处理摄像头图像数据 (支持Raw Binary和Base64)"""
         try:
-            # 去掉data:image/xxx;base64,前缀
-            if 'base64,' in payload_str:
-                base64_data = payload_str.split('base64,', 1)[1]
+            image_bytes = None
+            
+            # 1. 尝试检测是否为Raw Binary图像 (JPEG/PNG)
+            # JPEG starts with FF D8, PNG starts with 89 50 4E 47
+            if len(payload) > 4:
+                header = payload[:4]
+                if header.startswith(b'\xff\xd8') or header.startswith(b'\x89\x50\x4e\x47'):
+                    print(f"检测到原始二进制图像数据，长度: {len(payload)}")
+                    image_bytes = payload
+            
+            # 2. 如果不是Raw Binary，尝试作为Base64处理
+            if image_bytes is None:
+                try:
+                    payload_str = payload.decode('utf-8').strip()
+                    
+                    # 去掉data:image/xxx;base64,前缀
+                    if 'base64,' in payload_str:
+                        base64_data = payload_str.split('base64,', 1)[1]
+                    else:
+                        base64_data = payload_str
+                    
+                    # 修复padding
+                    missing_padding = len(base64_data) % 4
+                    if missing_padding:
+                        base64_data += '=' * (4 - missing_padding)
+                    
+                    image_bytes = base64.b64decode(base64_data)
+                    print(f"成功解码BASE64图像数据，字节长度: {len(image_bytes)}")
+                except Exception as e:
+                    # 解码失败，可能不是合法的Base64或UTF-8
+                    pass
+
+            if image_bytes:
+                # 发送图像数据信号
+                self.image_data_received.emit(client_id, image_bytes)
             else:
-                base64_data = payload_str
-            
-            # 清理base64数据
-            base64_data = base64_data.strip()
-            
-            # 修复padding
-            missing_padding = len(base64_data) % 4
-            if missing_padding:
-                base64_data += '=' * (4 - missing_padding)
-            
-            # 解码
-            image_bytes = base64.b64decode(base64_data)
-            #self.safe_log(f"成功解码BASE64图像数据，字节长度: {len(image_bytes)}")
-            print("成功解码BASE64图像数据，字节长度: ", len(image_bytes))
-            # 发送图像数据信号
-            self.image_data_received.emit(client_id, image_bytes)
+                self.safe_log("无法识别的图像数据格式")
             
         except Exception as e:
             self.safe_log(f"处理摄像头图像数据失败: {str(e)}")

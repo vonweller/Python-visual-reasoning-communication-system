@@ -229,9 +229,34 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.lbl_mqtt_status)
         controls_layout.addStretch()
         
+        # New Message Sending Area
+        self.send_msg_widget = QWidget()
+        send_layout = QHBoxLayout(self.send_msg_widget)
+        send_layout.setContentsMargins(0, 5, 0, 5)
+        
+        self.edit_pub_topic = QLineEdit()
+        self.edit_pub_topic.setPlaceholderText("Topic (例如: siot/舵机)")
+        self.edit_pub_topic.setText("siot/舵机") # Default
+        
+        self.edit_pub_message = QLineEdit()
+        self.edit_pub_message.setPlaceholderText("Message (例如: hello)")
+        
+        self.btn_pub_send = QPushButton("发送")
+        self.btn_pub_send.clicked.connect(self.send_manual_mqtt_message)
+        
+        send_layout.addWidget(QLabel("发布消息:"))
+        send_layout.addWidget(self.edit_pub_topic, 1) # Ratio 1
+        send_layout.addWidget(self.edit_pub_message, 2) # Ratio 2
+        send_layout.addWidget(self.btn_pub_send)
+        
+        # Initially only visible if needed, or always visible? 
+        # I'll make it visible but disabled if not connected, or just let it exist.
+        # Let's simple add it to layout.
+        
         self.mqtt_display = ImageDisplayWidget("MQTT 画面")
         
         layout.addLayout(controls_layout)
+        layout.addWidget(self.send_msg_widget)
         layout.addWidget(self.mqtt_display)
         
         self.mqtt_log_text = QTableWidget()
@@ -519,6 +544,18 @@ class MainWindow(QMainWindow):
             payload_str = ",".join(class_names)
             
             self.mqtt_worker.publish_message(publish_topic, payload_str)
+        
+        # Publish to MQTT Server if running (Server Mode)
+        if self.mqtt_server and self.mqtt_server.is_running():
+            publish_topic = self.config_manager.get("mqtt.publish_topic", "siot/推理结果")
+            
+            # Simplified payload: just the Chinese class names
+            class_names = [d['class_name_cn'] for d in detections]
+            payload_str = ",".join(class_names)
+            
+            # The server will broadcast this to all subscribers of the topic
+            self.mqtt_server.publish_message(publish_topic, payload_str)
+            print(f"[MainWindow] Published to MQTT Server topic '{publish_topic}': {payload_str}")
 
     # Local Image
     def load_image(self):
@@ -751,6 +788,30 @@ class MainWindow(QMainWindow):
                     self.log_result(f"MQTT服务端 ({topic})", detections)
         except Exception as e:
             self.log_mqtt_message(f"处理消息时出错: {str(e)}")
+
+    def send_manual_mqtt_message(self):
+        """手动发送MQTT消息"""
+        if not self.mqtt_server or not self.mqtt_server.is_running():
+            QMessageBox.warning(self, "错误", "MQTT 服务端未运行")
+            return
+            
+        topic = self.edit_pub_topic.text().strip()
+        message = self.edit_pub_message.text().strip()
+        
+        if not topic:
+            QMessageBox.warning(self, "错误", "请输入 Topic")
+            return
+            
+        if not message:
+            QMessageBox.warning(self, "错误", "请输入发送内容")
+            return
+            
+        try:
+            self.mqtt_server.publish_message(topic, message)
+            self.log_mqtt_message(f"手动发送 - 主题: {topic}, 内容: {message}")
+            self.edit_pub_message.clear() # Optional: clear message after send
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"发送失败: {str(e)}")
 
     def update_mqtt_status(self, connected, message):
         if connected:
